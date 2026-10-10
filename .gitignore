@@ -1,0 +1,15 @@
+# Secrets and local runtime state
+.env
+bot_database.json
+bot_database.json.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Test/tool output
+.coverage
+.pytest_cache/
+.ruff_cache/
