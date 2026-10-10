@@ -1,5 +1,6 @@
 # Secrets and local runtime state
 .env
+.vercel/
 bot_database.json
 bot_database.json.tmp
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import bot
+from api.webhook import _restore_panel_states, _serialize_panel_states
 from bot import JsonDatabase, chunks, format_mention
 
 
@@ -181,6 +182,20 @@ class HelperTests(unittest.TestCase):
     def test_chunks_reject_non_positive_size(self):
         with self.assertRaises(ValueError):
             chunks([1, 2], 0)
+
+    def test_vercel_panel_state_json_round_trip(self):
+        states = {
+            "-100123:55": {
+                "creator_id": 12,
+                "selected": {31, 42},
+                "page": 2,
+                "sending": False,
+                "last_used": 1700000000,
+            }
+        }
+        restored = _restore_panel_states(_serialize_panel_states(states))
+
+        self.assertEqual(restored, states)
 
 
 if __name__ == "__main__":

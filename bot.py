@@ -69,6 +69,14 @@ MEMBER_PAGE_SIZE = 8
 TAG_BATCH_SIZE = 5
 TAG_BATCH_DELAY_SECONDS = 3.05
 TAG_PANEL_TTL_SECONDS = 24 * 60 * 60
+VERCEL_MAX_TAG_USERS = 50
+
+
+def is_vercel_runtime() -> bool:
+    return (
+        os.getenv("VERCEL", "").casefold() == "1"
+        or os.getenv("CODE87_SERVERLESS", "").casefold() == "1"
+    )
 
 
 class JsonDatabase:
@@ -109,6 +117,21 @@ class JsonDatabase:
     def save(self) -> None:
         with self._lock:
             self._save_locked()
+
+    def export_data(self) -> dict[str, Any]:
+        with self._lock:
+            return copy.deepcopy(self._data)
+
+    def replace_data(self, data: Mapping[str, Any]) -> None:
+        if not isinstance(data, Mapping) or not isinstance(
+            data.get("groups", {}), dict
+        ):
+            raise TypeError("Database snapshot must contain a groups object.")
+        replacement = copy.deepcopy(dict(data))
+        replacement.setdefault("version", 1)
+        replacement.setdefault("groups", {})
+        with self._lock:
+            self._data = replacement
 
     def ensure_group(self, chat_id: int, title: str = "") -> dict[str, Any]:
         key = str(int(chat_id))
@@ -819,6 +842,12 @@ async def start_tag_job(
             "برای این عملیات عضوی برای تگ‌کردن پیدا نشد.", show_alert=True
         )
         return
+    if is_vercel_runtime() and len(users) > VERCEL_MAX_TAG_USERS:
+        await query.answer(
+            f"در Vercel هر بار حداکثر {VERCEL_MAX_TAG_USERS} نفر را تگ کنید؛ انتخاب را کوچک‌تر کنید.",
+            show_alert=True,
+        )
+        return
     state["sending"] = True
     state["last_used"] = int(time.time())
     creator_id = int(state["creator_id"])
@@ -836,15 +865,21 @@ async def start_tag_job(
             state["sending"] = False
             logger.warning("Could not switch tag panel to sending state: %s", exc)
             return
+    batch_args = (
+        context.application,
+        query.message.chat.id,
+        query.message.message_id,
+        panel_key,
+        creator_id,
+        list(users),
+    )
+    if is_vercel_runtime():
+        # Serverless platforms may freeze unawaited tasks as soon as the webhook
+        # response is returned, so complete the bounded job before replying.
+        await send_tag_batches(*batch_args)
+        return
     context.application.create_task(
-        send_tag_batches(
-            context.application,
-            query.message.chat.id,
-            query.message.message_id,
-            panel_key,
-            creator_id,
-            list(users),
-        ),
+        send_tag_batches(*batch_args),
         name=f"tag-batches-{query.message.chat.id}-{query.message.message_id}",
     )
 
@@ -1014,6 +1049,12 @@ async def handle_tag_callback(query: Any, context: ContextTypes.DEFAULT_TYPE) ->
         if user_id in selected:
             selected.remove(user_id)
         else:
+            if is_vercel_runtime() and len(selected) >= VERCEL_MAX_TAG_USERS:
+                await query.answer(
+                    f"در Vercel حداکثر {VERCEL_MAX_TAG_USERS} نفر را در هر نوبت انتخاب کنید.",
+                    show_alert=True,
+                )
+                return
             selected.add(user_id)
         state["selected"] = selected
         await query.answer("انتخاب به‌روز شد.")
@@ -1312,15 +1353,18 @@ async def post_init(application: Application) -> None:
         logger.warning("Could not publish bot command menu: %s", exc)
 
 
-def main() -> None:
+def build_application(*, run_post_init: bool = True) -> Application:
     if not BOT_TOKEN:
-        raise SystemExit(
-            "BOT_TOKEN is missing. Copy .env.example to .env and add a freshly generated token."
-        )
-    if OWNER_ID <= 0:
-        raise SystemExit("OWNER_ID must be a positive Telegram user ID.")
+        raise RuntimeError("BOT_TOKEN is missing.")
+    builder = ApplicationBuilder().token(BOT_TOKEN)
+    if run_post_init:
+        builder.post_init(post_init)
+    application = builder.build()
+    register_handlers(application)
+    return application
 
-    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+
+def register_handlers(application: Application) -> None:
     # The tracker runs before the text command handler, so a command sender is
     # also added/updated in target_users. Handlers in different groups both run.
     application.add_handler(
@@ -1341,6 +1385,16 @@ def main() -> None:
         group=1,
     )
 
+
+def main() -> None:
+    if not BOT_TOKEN:
+        raise SystemExit(
+            "BOT_TOKEN is missing. Copy .env.example to .env and add a freshly generated token."
+        )
+    if OWNER_ID <= 0:
+        raise SystemExit("OWNER_ID must be a positive Telegram user ID.")
+
+    application = build_application()
     logger.info("Starting %s for owner %s", APP_NAME, OWNER_ID)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
